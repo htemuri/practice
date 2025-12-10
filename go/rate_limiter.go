@@ -17,35 +17,40 @@ package main
 import (
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 )
 
 type RateLimiter struct {
 	counter   int
 	threshold int
-	rate      int
-	quit      chan int
-	ticker    <-chan time.Time
+	dripRate  int
+	quit      chan struct{}
+	mutex     sync.Mutex
 }
 
 func NewRateLimiter(rate int, per time.Duration) *RateLimiter {
 	rateLimiter := RateLimiter{
 		counter:   0,
 		threshold: 100,
-		rate:      rate,
-		ticker:    time.Tick(per),
-		quit:      make(chan int),
+		dripRate:  rate,
+		quit:      make(chan struct{}),
 	}
+	log.Println(per / time.Duration(rate))
+	ticker := time.Tick(per / time.Duration(rate))
 
 	go func() {
 		for {
 			select {
-			case <-rateLimiter.ticker:
-				rateLimiter.counter -= rate
+			case <-ticker:
+				rateLimiter.mutex.Lock()
+				rateLimiter.counter--
 				if rateLimiter.counter < 0 {
 					rateLimiter.counter = 0
 				}
 				log.Println("drip...")
+				log.Println("Current counter: ", rateLimiter.counter)
+				rateLimiter.mutex.Unlock()
 			case <-rateLimiter.quit:
 				log.Println("Quitting...")
 				return
@@ -55,37 +60,35 @@ func NewRateLimiter(rate int, per time.Duration) *RateLimiter {
 	return &rateLimiter
 }
 
-func (r *RateLimiter) Allow(random int) bool {
-	return r.counter+random < r.threshold
+func (r *RateLimiter) Allow() bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.counter < r.threshold {
+		r.counter++
+		log.Println("Counter after recieving request: ", r.counter)
+		return true
+	}
+	return false
 }
 
 func (r *RateLimiter) Stop() {
-	r.quit <- 1
+	close(r.quit)
 }
 
 func main() {
 	start := time.Now()
-	rateLimiter := NewRateLimiter(10, time.Duration(time.Second*2))
+	rateLimiter := NewRateLimiter(5, time.Duration(time.Second*12))
 	go func() {
 		for {
-			select {
-			case <-rateLimiter.quit:
-				return
-			default:
-				random := rand.Intn(50)
-				if rateLimiter.Allow(random) {
-					log.Println("Sending token size: ", random)
-					rateLimiter.counter += random
-				} else {
-					log.Printf("Token size %d rejected. Bucket full!", random)
-				}
-				time.Sleep(time.Duration((rand.Intn(5000) + 1000) * int(time.Millisecond)))
+			if rateLimiter.Allow() {
+				log.Println("Request recieved")
+			} else {
+				log.Printf("Request rejected. Bucket full!")
 			}
+			time.Sleep(time.Duration((rand.Intn(500) + 1800) * int(time.Millisecond)))
 		}
 	}()
 	for {
-		log.Println("Counter: ", rateLimiter.counter)
-		time.Sleep(2000 * time.Millisecond)
 		if time.Since(start).Round(time.Second) >= time.Second*20 {
 			log.Println("sending stop signal")
 			rateLimiter.Stop()
